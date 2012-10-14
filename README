@@ -1,0 +1,12 @@
+RecordSAT is SAT solver which records its actions in LaTeX.
+
+To compile it, you'll need:
+
+  * OCaml
+  * Findlib
+  * OCaml Batteries Included
+
+Then run command
+
+  make all
+
