@@ -698,10 +698,24 @@ let php_problem npigeons nholes =
 
   prob
 
-let selected_problem = simple_problem
+let select_simple () =
+  var_to_str_func := (fun x -> sprintf "x%d" (x+1));
+  var_to_tex_func := (fun x -> sprintf "x_{%d}" (x+1));
+
+  simple_problem ()
+
+let select_php npigeons nholes () =
+  var_to_str_func := (fun x -> sprintf "p%dh%d" (x / nholes) (x mod nholes));
+  var_to_tex_func := (fun x -> sprintf "p_{%d,%d}" (x / nholes) (x mod nholes));
+
+  php_problem npigeons nholes
+
+let select_problem =
+  (* select_php 4 3 *)
+  select_simple
 
 let _ =
-  let prob = selected_problem () in
+  let prob = select_problem () in
 
   begin_report prob;
 
