@@ -47,6 +47,17 @@ let array_rfindi pred arr =
 
   loop (Array.length arr - 1)
 
+let array_uniq arr =
+  let h = Hashtbl.create (Array.length arr / 2 + 1) in
+  let not_seen lit =
+    if Hashtbl.mem h lit then
+      false
+    else begin
+      Hashtbl.add h lit ();
+      true
+    end in
+  BatArray.filter not_seen arr
+
 let dyn_array_findi pred arr =
   let rec loop i =
     if i < BatDynArray.length arr then
@@ -183,10 +194,8 @@ let propagate prob =
 let resolve a b x =
   let lits =
     Array.append a.lits b.lits
-    |> BatArray.enum
-    |> BatEnum.filter (fun (Lit(_, var)) -> var <> x)
-    |> BatEnum.uniq
-    |> BatArray.of_enum
+    |> array_uniq
+    |> BatArray.filter (fun (Lit(_, var)) -> var <> x)
   in
 
   { lits; resolution_proof = Some(a, b) }
