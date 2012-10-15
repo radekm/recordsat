@@ -202,6 +202,70 @@ let gen_impl_graph prob conflict uip =
 
   Buffer.contents b
 
+(* Only literals are compared (resolution proof is ignored). *)
+module Ctbl = Hashtbl.Make (struct
+  type t = clause
+  let equal a b = a.lits = b.lits
+  let hash a = Hashtbl.hash a.lits
+end)
+
+let gen_resolution_graph prob clause =
+  let b = Buffer.create 1024 in
+  let add str = Buffer.add_string b str; Buffer.add_char b '\n' in
+
+  (* Header *)
+  add "digraph G {";
+  add "size=\"20,20\";";
+  add "node [shape=box,style=rounded];";
+
+  (* Short identifier for each clause *)
+  let clause_ids = Ctbl.create 20 in
+  let get_id cl =
+    if Ctbl.mem clause_ids cl then
+      Ctbl.find clause_ids cl
+    else begin
+      let id = Ctbl.length clause_ids in
+      Ctbl.add clause_ids cl id;
+      id
+    end in
+
+  (* Already proved clauses and clauses in queue unproved. *)
+  let processed = Ctbl.create 20 in
+  let unproved = Queue.create () in
+
+  let process (cl : clause) =
+    if not (Ctbl.mem processed cl) then begin
+      Ctbl.add processed cl ();
+      Queue.push cl unproved
+    end in
+
+  process clause;
+
+  while not (Queue.is_empty unproved) do
+    let cl = Queue.pop unproved in
+    let id = get_id cl in
+
+    add (sprintf "cl%d [label=\"%s\"];" id (clause_to_str cl));
+
+    begin match cl.resolution_proof with
+      | None -> ()
+      | Some(a, b) ->
+          let id_a = get_id a in
+          let id_b = get_id b in
+
+          add (sprintf "cl%d -> cl%d;" id_a id);
+          add (sprintf "cl%d -> cl%d;" id_b id);
+
+          process a;
+          process b
+    end
+  done;
+
+  (* Footer *)
+  add "}";
+
+  Buffer.contents b
+
 let report_chan = open_out "report.tex"
 
 let begin_report prob =
@@ -292,10 +356,20 @@ let report_sat prob =
   fprintf r "\\end{itemize}\n";
   fprintf r "\\end{multicols}\n\n"
 
-let report_unsat prob =
+let report_unsat prob empty_cl =
   let r = report_chan in
 
-  fprintf r "No satisfying assignment found.\n\n"
+  (* Create PDF with resolution graph *)
+  let res_file = "resolution_proof" in
+  let res_pdf = res_file ^ ".pdf" in
+  let res_chan = open_out res_file in
+  output_string res_chan (gen_resolution_graph prob empty_cl);
+  close_out res_chan;
+  Sys.command ("dot  -Tpdf -O " ^ res_file) |> ignore;
+
+  fprintf r "No satisfying assignment found. Here is proof by resolution\n\n";
+  fprintf r "\\begin{center}\n\\includegraphics[width=1\\textwidth]{%s}\n\\end{center}\n\n" res_pdf
+
 
 let end_report prob =
   let r = report_chan in
@@ -506,7 +580,7 @@ let rec do_propagation prob =
           (* If the clause is not empty, we have to resolve out all literals. *)
           let cl = resolve_until (fun _ cl -> Array.length cl.lits = 0) prob learned_cl in
 
-          report_unsat prob;
+          report_unsat prob cl;
 
           Empty cl
         end else begin
