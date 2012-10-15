@@ -25,7 +25,9 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 *)
 
-open BatPervasives
+open Printf
+
+let (|>) = BatPervasives.(|>)
 
 (* ************************************** *)
 (* Additional functions for arrays        *)
@@ -76,7 +78,7 @@ let dyn_array_enum_rev arr =
   BatEnum.init n (fun i -> BatDynArray.get arr (n-i-1))
 
 (* ************************************** *)
-(* Sat solver                             *)
+(* Sat solver types                       *)
 
 type var = int
 
@@ -110,6 +112,199 @@ type problem = {
   trace : (var * reason) BatDynArray.t;
   mutable dlevel : int;
 }
+
+(* ************************************** *)
+(* Report generation                      *)
+
+let var_to_tex_func = ref (sprintf "x_{%d}")
+let var_to_str_func = ref (sprintf "x%d")
+
+let impl_graphs_cnt = ref 0
+
+let var_to_tex v =
+  !var_to_tex_func v
+
+let var_to_str v =
+  !var_to_str_func v
+
+let show_clause show_var neg or_str empty_cl cl =
+  let show_lit = function
+    | Lit(true, x) -> show_var x
+    | Lit(false, x) -> neg ^ show_var x
+  in
+  match Array.to_list cl.lits with
+    | [] -> empty_cl
+    | [l] -> show_lit l
+    | l :: lits ->
+        List.fold_left
+          (fun str l -> str ^ or_str ^ show_lit l)
+          (show_lit l)
+          lits
+
+let clause_to_tex = show_clause var_to_tex "\\neg " "\\vee " "\\Box "
+let clause_to_str = show_clause var_to_str "~" "|" "[]"
+
+let gen_impl_graph prob conflict uip =
+  let b = Buffer.create 1024 in
+  let add str = Buffer.add_string b str; Buffer.add_char b '\n' in
+
+  (* Header *)
+  add "digraph G {";
+  add "size=\"20,20\";";
+  add "rankdir=LR;";
+  add "node [shape=box,style=rounded];";
+
+  (* Vertices for variables *)
+  BatDynArray.iter
+    (fun (v, reason) ->
+      let var = var_to_str v in
+      let dlevel = BatDynArray.get prob.decision_levels v in
+      let ass = match BatDynArray.get prob.assignment v with
+        | XTrue -> 1
+        | XFalse -> 0
+        | XUndef -> failwith "Unexpected assignment"
+      in
+      let decided_style = match reason with
+        | Decided -> "style=\"rounded,filled\",fillcolor=gray,"
+        | Implied _ -> ""
+      in
+      let uip_style =
+        let in_uip = BatArray.exists (fun (Lit(_, x)) -> x = v) uip.lits in
+        if in_uip then "color=red," else ""
+      in
+      add (sprintf "%s [%s%slabel=\"%s = %d (%d)\"];" var decided_style uip_style var ass dlevel))
+    prob.trace;
+
+  (* Vertex K for conflict *)
+  add "K [shape=circle];";
+
+  let edges_to_var v var cl =
+    let add_edge src dest lab = add (sprintf "%s -> %s [label=\"%s\"];" src dest lab) in
+    cl.lits
+    |> BatArray.enum
+    |> BatEnum.filter (fun (Lit(_, x)) -> x <> v)
+    |> BatEnum.iter (fun (Lit(_, x)) -> add_edge (var_to_str x) var (clause_to_str cl))
+  in
+
+  (* Edges for implied variables *)
+  BatDynArray.iter
+    (fun (v, reason) ->
+      match reason with
+        | Decided -> ()
+        | Implied cl -> edges_to_var v (var_to_str v) cl)
+    prob.trace;
+
+  (* Edges for conflict *)
+  edges_to_var ~-1 "K" conflict;
+
+  (* Footer *)
+  add "}";
+
+  Buffer.contents b
+
+let report_chan = open_out "report.tex"
+
+let begin_report prob =
+  let r = report_chan in
+
+  fprintf r "\\documentclass[a4paper]{article}\n";
+  fprintf r "\\usepackage[left=1cm,right=1cm,top=2cm,bottom=2cm]{geometry}\n";
+  fprintf r "\\usepackage{graphicx}\n";
+  fprintf r "\\usepackage{multicol}\n";
+  fprintf r "\\usepackage{amsmath}\n";
+  fprintf r "\\setlength{\\parindent}{0pt}\n";
+  fprintf r "\\begin{document}\n\n";
+
+  fprintf r "Satisfying following clauses:\n";
+  fprintf r "\\begin{multicols}{2}\n";
+  fprintf r "\\begin{itemize}\n";
+  BatDynArray.iter (fun cl -> fprintf r "\\item $%s$\n" (clause_to_tex cl)) prob.clauses;
+  fprintf r "\\end{itemize}\n";
+  fprintf r "\\end{multicols}\n\n"
+
+let report_propagation prob orig_trace_length =
+  let r = report_chan in
+  let cur_trace_length = BatDynArray.length prob.trace in
+
+  if cur_trace_length = orig_trace_length then
+    fprintf r "No unit propagation was done.\n\n"
+  else begin
+    fprintf r "Propagation:\n";
+    fprintf r "\\begin{itemize}\n";
+    for i = orig_trace_length to cur_trace_length-1 do
+      let var, cl = match BatDynArray.get prob.trace i with
+        | var, Implied cl -> var, cl
+        | _, Decided -> failwith "Variable assigned by propagation is not decided"
+      in
+      let ass = match BatDynArray.get prob.assignment var with
+        | XTrue -> 1
+        | XFalse -> 0
+        | XUndef -> failwith "Variable assigned by propagation cannot be undefined"
+      in
+      fprintf r "\\item $%s = %d$ by $%s$\n" (var_to_tex var) ass (clause_to_tex cl)
+    done;
+    fprintf r "\\end{itemize}\n\n";
+  end
+
+let report_decision prob =
+  let r = report_chan in
+  let var = match BatDynArray.last prob.trace with
+    | var, Decided -> var
+    | _, Implied _ -> failwith "Decided variable is not implied"
+  in
+  let ass = match BatDynArray.get prob.assignment var with
+    | XTrue -> 1
+    | XFalse -> 0
+    | XUndef -> failwith "Decided variable must be assigned"
+  in
+  fprintf r "Decided $%s = %d$ at decision level %d.\n\n" (var_to_tex var) ass prob.dlevel
+
+let report_conflict prob conflict_cl learned_cl nlevel =
+  let r = report_chan in
+
+  (* Create PDF with implication graph *)
+  let ig_file = sprintf "ig%d" !impl_graphs_cnt in
+  let ig_pdf = ig_file ^ ".pdf" in
+  let ig_chan = open_out ig_file in
+  output_string ig_chan (gen_impl_graph prob conflict_cl learned_cl);
+  close_out ig_chan;
+  Sys.command ("dot  -Tpdf -O " ^ ig_file ^ "\n") |> ignore;
+  impl_graphs_cnt := !impl_graphs_cnt + 1;
+
+  fprintf r "Conflict in clause $%s$. Here is implication graph\n\n" (clause_to_tex conflict_cl);
+  fprintf r "\\begin{center}\n\\includegraphics[width=1\\textwidth]{%s}\n\\end{center}\n\n" ig_pdf;
+
+  fprintf r "Adding clause $%s$.\n\n" (clause_to_tex learned_cl);
+  fprintf r "Backtracking to decision level $%d$.\n\n" nlevel
+
+let report_sat prob =
+  let r = report_chan in
+
+  fprintf r "Found satisfying assignment:\n";
+  fprintf r "\\begin{multicols}{2}\n";
+  fprintf r "\\begin{itemize}\n";
+  for v = 0 to BatDynArray.length prob.assignment-1 do
+    match BatDynArray.get prob.assignment v with
+      | XTrue -> fprintf r "\\item $%s = 1$\n" (var_to_tex v)
+      | XFalse -> fprintf r "\\item $%s = 0$\n" (var_to_tex v)
+      | XUndef -> ()
+  done;
+  fprintf r "\\end{itemize}\n";
+  fprintf r "\\end{multicols}\n\n"
+
+let report_unsat prob =
+  let r = report_chan in
+
+  fprintf r "No satisfying assignment found.\n\n"
+
+let end_report prob =
+  let r = report_chan in
+
+  fprintf r "\\end{document}\n";
+  close_out r
+
+(* ************************************** *)
+(* Sat solver                             *)
 
 let lit_var (Lit(_, var)) = var
 
@@ -274,7 +469,9 @@ let decide prob =
     prob.dlevel <- prob.dlevel + 1;
     BatDynArray.add prob.trace (var, Decided);
     BatDynArray.set prob.assignment var XFalse;
-    BatDynArray.set prob.decision_levels var prob.dlevel
+    BatDynArray.set prob.decision_levels var prob.dlevel;
+
+    report_decision prob;
   with
     | Not_found -> failwith "No unassigned variable."
 
@@ -295,14 +492,22 @@ type result =
   | Unknown
 
 let rec do_propagation prob =
+  (* For reporting *)
+  let orig_trace_len = BatDynArray.length prob.trace in
+
   match propagate prob with
     | Some conflict ->
         let learned_cl = compute_uip prob conflict in
         BatDynArray.add prob.clauses learned_cl;
 
+        report_propagation prob orig_trace_len;
+
         if prob.dlevel = 0 then begin
           (* If the clause is not empty, we have to resolve out all literals. *)
           let cl = resolve_until (fun _ cl -> Array.length cl.lits = 0) prob learned_cl in
+
+          report_unsat prob;
+
           Empty cl
         end else begin
           assert (Array.length learned_cl.lits > 0);
@@ -315,18 +520,23 @@ let rec do_propagation prob =
             |> BatEnum.fold max 0
           in
 
+          report_conflict prob conflict learned_cl nlevel;
+
           backtrack prob nlevel;
           do_propagation prob
         end
 
     | None ->
+        report_propagation prob orig_trace_len;
+
         (* Check if satisfied - we can use watched literals. *)
         if prob.clauses
            |> BatDynArray.enum
            |> BatEnum.for_all (watched_literals_sat prob)
-        then
+        then begin
+          report_sat prob;
           Sat
-        else
+        end else
           Unknown
 
 (* Returns empty clause with proof by resolution.  *)
@@ -418,6 +628,12 @@ let selected_problem = simple_problem
 
 let _ =
   let prob = selected_problem () in
-  match solve prob with
+
+  begin_report prob;
+
+  begin match solve prob with
     | None -> print_string "sat\n"
     | Some _ -> print_string "unsat\n"
+  end;
+
+  end_report prob

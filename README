@@ -10,3 +10,10 @@ Then run command
 
   make all
 
+
+
+To run program, you'll need:
+
+  * Graphviz
+
+Note: progress report will be generated in working directory.
