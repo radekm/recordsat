@@ -332,7 +332,7 @@ let report_conflict prob conflict_cl learned_cl nlevel =
   let ig_chan = open_out ig_file in
   output_string ig_chan (gen_impl_graph prob conflict_cl learned_cl);
   close_out ig_chan;
-  Sys.command ("dot  -Tpdf -O " ^ ig_file ^ "\n") |> ignore;
+  Sys.command ("dot  -Tpdf -O " ^ ig_file) |> ignore;
   impl_graphs_cnt := !impl_graphs_cnt + 1;
 
   fprintf r "Conflict in clause $%s$. Here is implication graph\n\n" (clause_to_tex conflict_cl);
